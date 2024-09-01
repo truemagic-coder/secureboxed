@@ -16,6 +16,7 @@ python-multipart = "^0.0.9"
 shadow-drive = "^0.0.0"
 solders = "^0.21.0"
 python-dotenv = "^1.0.1"
+solana = "^0.34.3"
 
 
 [tool.poetry.group.dev.dependencies]
