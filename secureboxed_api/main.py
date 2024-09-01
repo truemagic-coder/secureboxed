@@ -11,7 +11,6 @@ from solders.keypair import Keypair
 from motor.motor_asyncio import AsyncIOMotorClient
 import jwt
 from datetime import datetime, timedelta
-from enum import Enum
 import base64
 
 load_dotenv()
@@ -35,29 +34,15 @@ JWT_EXPIRATION_MINUTES = 30
 # OAuth2 scheme for token
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-# Initialize ShadowDriveClient with the key from .env
-shadow_drive_keypair = Keypair.from_base58_string(os.getenv("SHADOW_DRIVE_PRIVATE_KEY"))
-shadow_drive_client = ShadowDriveClient(shadow_drive_keypair)
-
-
-class UserPlan(str, Enum):
-    FREE = "free"
-    BASIC = "basic"
-    PRO = "pro"
-
-
-PLAN_STORAGE_LIMITS = {
-    UserPlan.FREE: 1 * 1024 * 1024 * 1024,  # 1 GB
-    UserPlan.BASIC: 10 * 1024 * 1024 * 1024,  # 10 GB
-    UserPlan.PRO: 100 * 1024 * 1024 * 1024,  # 100 GB
-}
-
 
 class UserSession:
-    def __init__(self, public_key: Pubkey, plan: UserPlan, encryption_key: bytes):
+    def __init__(
+        self, public_key: Pubkey, encryption_key: bytes, shadow_drive_keypair: Keypair
+    ):
         self.public_key = public_key
-        self.plan = plan
         self.encryption_key = encryption_key
+        self.shadow_drive_keypair = shadow_drive_keypair
+        self.shadow_drive_client = ShadowDriveClient(shadow_drive_keypair)
 
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
@@ -78,8 +63,9 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         raise HTTPException(status_code=404, detail="User not found")
 
     encryption_key = base64.b64decode(user["encryption_key"])
+    shadow_drive_keypair = Keypair.from_base58_string(user["shadow_drive_private_key"])
     return UserSession(
-        Pubkey.from_string(public_key), UserPlan(user["plan"]), encryption_key
+        Pubkey.from_string(public_key), encryption_key, shadow_drive_keypair
     )
 
 
@@ -91,20 +77,6 @@ def create_access_token(data: dict):
     return encoded_jwt
 
 
-async def check_storage_limit(user: UserSession, file_size: int):
-    pipeline = [
-        {"$match": {"user_public_key": str(user.public_key)}},
-        {"$group": {"_id": None, "total_size": {"$sum": "$size"}}},
-    ]
-    result = await files_collection.aggregate(pipeline).to_list(None)
-
-    current_usage = result[0]["total_size"] if result else 0
-    plan_limit = PLAN_STORAGE_LIMITS[user.plan]
-
-    if current_usage + file_size > plan_limit:
-        raise HTTPException(status_code=403, detail="Storage limit exceeded")
-
-
 @app.post("/login")
 async def login(public_key: str):
     # Check if user exists in the database
@@ -113,12 +85,14 @@ async def login(public_key: str):
     if user is None:
         # Generate a new encryption key for the user
         encryption_key = AESGCM.generate_key(bit_length=128)
-        # Save the new user to the database with the free plan and encryption key
+        # Generate a new ShadowDrive keypair for the user
+        shadow_drive_keypair = Keypair()
+        # Save the new user to the database
         await users_collection.insert_one(
             {
                 "public_key": public_key,
-                "plan": UserPlan.FREE,
                 "encryption_key": base64.b64encode(encryption_key).decode(),
+                "shadow_drive_private_key": shadow_drive_keypair.to_base58_string(),
             }
         )
 
@@ -127,15 +101,16 @@ async def login(public_key: str):
     return {"access_token": access_token, "token_type": "bearer"}
 
 
+@app.get("/shadow_drive_public_key")
+async def get_shadow_drive_public_key(user: UserSession = Depends(get_current_user)):
+    return {"shadow_drive_public_key": str(user.shadow_drive_keypair.pubkey())}
+
+
 @app.post("/upload")
 async def upload_file(
     file: UploadFile = File(...), user: UserSession = Depends(get_current_user)
 ):
     contents = await file.read()
-    file_size = len(contents)
-
-    # Check if the upload would exceed the user's storage limit
-    await check_storage_limit(user, file_size)
 
     aesgcm = AESGCM(user.encryption_key)
     nonce = os.urandom(12)
@@ -145,7 +120,7 @@ async def upload_file(
     with open(encrypted_filename, "wb") as f:
         f.write(nonce + encrypted_data)
 
-    urls = shadow_drive_client.upload_files([encrypted_filename])
+    urls = user.shadow_drive_client.upload_files([encrypted_filename])
 
     os.remove(encrypted_filename)
 
@@ -154,7 +129,7 @@ async def upload_file(
         {
             "user_public_key": str(user.public_key),
             "filename": file.filename,
-            "size": file_size,
+            "size": len(contents),
             "url": urls[0],
         }
     )
@@ -170,7 +145,7 @@ async def download_file(filename: str, user: UserSession = Depends(get_current_u
     if not file_info:
         raise HTTPException(status_code=404, detail="File not found")
 
-    encrypted_data = shadow_drive_client.get_file(file_info["url"])
+    encrypted_data = user.shadow_drive_client.get_file(file_info["url"])
 
     nonce = encrypted_data[:12]
     encrypted_content = encrypted_data[12:]
@@ -188,7 +163,7 @@ async def delete_file(filename: str, user: UserSession = Depends(get_current_use
     if not file_info:
         raise HTTPException(status_code=404, detail="File not found")
 
-    shadow_drive_client.delete_files([file_info["url"]])
+    user.shadow_drive_client.delete_files([file_info["url"]])
 
     return {"message": f"File {filename} deleted successfully"}
 
@@ -203,6 +178,27 @@ async def list_files(user: UserSession = Depends(get_current_user)):
     }
 
 
+@app.post("/add_storage")
+async def add_storage(size_bytes: int, user: UserSession = Depends(get_current_user)):
+    try:
+        # Assuming the ShadowDriveClient has a method to add storage
+        result = user.shadow_drive_client.add_storage(size_bytes)
+
+        # Update the user's storage information in the database
+        await users_collection.update_one(
+            {"public_key": str(user.public_key)},
+            {"$inc": {"total_storage": size_bytes}},
+        )
+
+        return {
+            "message": "Storage added successfully",
+            "added_storage_bytes": size_bytes,
+            "result": result,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to add storage: {str(e)}")
+
+
 @app.get("/user_storage")
 async def get_user_storage(user: UserSession = Depends(get_current_user)):
     pipeline = [
@@ -214,39 +210,12 @@ async def get_user_storage(user: UserSession = Depends(get_current_user)):
     if result:
         total_size_bytes = result[0]["total_size"]
         total_size_gb = total_size_bytes / (1024 * 1024 * 1024)  # Convert bytes to GB
-        plan_limit_gb = PLAN_STORAGE_LIMITS[user.plan] / (1024 * 1024 * 1024)
         return {
             "user": str(user.public_key),
-            "plan": user.plan,
             "total_storage_gb": round(total_size_gb, 4),
-            "storage_limit_gb": round(plan_limit_gb, 4),
-            "storage_used_percentage": round((total_size_gb / plan_limit_gb) * 100, 2),
         }
     else:
-        plan_limit_gb = PLAN_STORAGE_LIMITS[user.plan] / (1024 * 1024 * 1024)
         return {
             "user": str(user.public_key),
-            "plan": user.plan,
             "total_storage_gb": 0,
-            "storage_limit_gb": round(plan_limit_gb, 4),
-            "storage_used_percentage": 0,
         }
-
-
-@app.post("/upgrade_plan")
-async def upgrade_plan(
-    new_plan: UserPlan, user: UserSession = Depends(get_current_user)
-):
-    if new_plan == user.plan:
-        raise HTTPException(status_code=400, detail="User is already on this plan")
-
-    if PLAN_STORAGE_LIMITS[new_plan] < PLAN_STORAGE_LIMITS[user.plan]:
-        raise HTTPException(
-            status_code=400, detail="Cannot downgrade to a plan with less storage"
-        )
-
-    await users_collection.update_one(
-        {"public_key": str(user.public_key)}, {"$set": {"plan": new_plan}}
-    )
-
-    return {"message": f"Successfully upgraded to {new_plan} plan"}
