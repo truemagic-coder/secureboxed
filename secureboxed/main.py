@@ -60,7 +60,7 @@ def get_shadow_drive_client(password):
     try:
         private_key = f.decrypt(encrypted_private_key.encode()).decode()
         keypair = Keypair.from_base58_string(private_key)
-        return ShadowDriveClient(keypair)
+        return ShadowDriveClient(keypair, "https://api.walletbubbles.com/rpc")
     except:
         click.echo("Invalid password or corrupted credentials.")
         return None
@@ -161,6 +161,9 @@ def upload(path, password, encrypt):
         
         click.echo(f'File {path} uploaded successfully. URL: {urls[0]}')
     elif path.is_dir():
+        files_to_upload = []
+        temp_files = []
+
         for root, _, files in os.walk(path):
             for file in files:
                 file_path = Path(root) / file
@@ -169,16 +172,24 @@ def upload(path, password, encrypt):
                     temp_file = Path(f"{file_path}.encrypted")
                     with open(temp_file, 'wb') as f:
                         f.write(encrypted_data)
-                    file_to_upload = temp_file
+                    files_to_upload.append(str(temp_file))
+                    temp_files.append(temp_file)
                 else:
-                    file_to_upload = file_path
-                
-                urls = client.upload_files([str(file_to_upload)])
-                
-                if encrypt:
-                    temp_file.unlink()  # Delete the temporary encrypted file
-                
-                click.echo(f'File {file_path} uploaded successfully. URL: {urls[0]}')
+                    files_to_upload.append(str(file_path))
+
+        # Upload all files at once
+        urls = client.upload_multiple_files(files_to_upload)
+
+        # Clean up temporary encrypted files
+        for temp_file in temp_files:
+            temp_file.unlink()
+
+        # Print results
+        for file_path, url in zip(files_to_upload, urls):
+            original_path = Path(file_path)
+            if encrypt:
+                original_path = original_path.with_suffix('')  # Remove .encrypted suffix
+            click.echo(f'File {original_path} uploaded successfully. URL: {url}')
     else:
         click.echo(f"Path {path} does not exist")
 
@@ -186,7 +197,7 @@ def upload(path, password, encrypt):
 @click.argument('url')
 @click.argument('path')
 @click.option('--password', prompt=True, hide_input=True)
-@click.option('--decrypt', is_flag=True, help='Decrypt the file after downloading')
+@click.option('--decrypt', is_flag=True, help='Decrypt the files after downloading')
 def download(url, path, password, decrypt):
     client = get_shadow_drive_client(password)
     if client is None:
@@ -200,19 +211,46 @@ def download(url, path, password, decrypt):
     f = Fernet(generate_encryption_key(password))
     encryption_key = f.decrypt(encrypted_encryption_key.encode())
 
-    file_data = client.get_file(url)
-    file_path = Path(path)
-    file_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = Path(path)
+    output_path.mkdir(parents=True, exist_ok=True)
 
-    if decrypt:
-        decrypted_data = decrypt_file(file_data, encryption_key)
-        with open(file_path, 'wb') as f:
-            f.write(decrypted_data)
-        click.echo(f'File downloaded and decrypted successfully to {file_path}')
+    # Check if the URL is for a single file or a directory
+    file_list = client.list_files(url)
+    
+    if not file_list:
+        # Single file download
+        file_data = client.get_file(url)
+        file_name = url.split('/')[-1]
+        file_path = output_path / file_name
+        
+        if decrypt:
+            decrypted_data = decrypt_file(file_data, encryption_key)
+            with open(file_path, 'wb') as f:
+                f.write(decrypted_data)
+            click.echo(f'File downloaded and decrypted successfully to {file_path}')
+        else:
+            with open(file_path, 'wb') as f:
+                f.write(file_data)
+            click.echo(f'File downloaded successfully to {file_path}')
     else:
-        with open(file_path, 'wb') as f:
-            f.write(file_data)
-        click.echo(f'File downloaded successfully to {file_path}')
+        # Directory download
+        for file_info in file_list:
+            file_url = file_info['url']
+            file_name = file_info['name']
+            file_data = client.get_file(file_url)
+            file_path = output_path / file_name
+            
+            if decrypt:
+                decrypted_data = decrypt_file(file_data, encryption_key)
+                with open(file_path, 'wb') as f:
+                    f.write(decrypted_data)
+                click.echo(f'File {file_name} downloaded and decrypted successfully to {file_path}')
+            else:
+                with open(file_path, 'wb') as f:
+                    f.write(file_data)
+                click.echo(f'File {file_name} downloaded successfully to {file_path}')
+
+    click.echo(f'All files downloaded successfully to {output_path}')
 
 @cli.command()
 @click.option('--password', prompt=True, hide_input=True)
