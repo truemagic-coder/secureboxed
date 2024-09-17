@@ -1,26 +1,17 @@
 [tool.poetry]
-name = "secureboxed-api"
-version = "0.1.0"
+name = "secureboxed"
+version = "0.0.1"
 description = ""
 authors = ["Bevan Hunt <bevan@bevanhunt.com>"]
 readme = "README.md"
-packages = [{include = "secureboxed_api"}]
+packages = [{include = "secureboxed"}]
 
 [tool.poetry.dependencies]
 python = ">=3.9,<4.0"
-fastapi = "^0.112.2"
-uvicorn = {version="==0.30.6", extras=["standard"]}
-gunicorn = "==23.0.0"
 cryptography = "^43.0.0"
-python-multipart = "^0.0.9"
 shadow-drive = "^0.0.0"
 solders = "^0.21.0"
-python-dotenv = "^1.0.1"
 solana = "^0.34.3"
-motor = "^3.5.1"
-pymongo = "^4.8.0"
-base58 = "^2.1.1"
-pyjwt = "^2.9.0"
 
 
 [tool.poetry.group.dev.dependencies]
@@ -28,8 +19,6 @@ pytest = "*"
 pylint = "*"
 autopep8 = "*"
 pytest-cov = "*"
-pytest-flask = "*"
-httpx = "*"
 complexipy = "*"
 pytest-asyncio = "*"
 
