@@ -1,10 +1,10 @@
 [tool.poetry]
-name = "secureboxed"
+name = "sovereign-files"
 version = "0.0.1"
 description = ""
 authors = ["Bevan Hunt <bevan@bevanhunt.com>"]
 readme = "README.md"
-packages = [{include = "secureboxed"}]
+packages = [{include = "sovereign_files"}]
 
 [tool.poetry.dependencies]
 python = ">=3.9,<4.0"
@@ -28,3 +28,6 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.pytest.ini-options]
 python_paths = [".", "tests"]
+
+[tool.poetry.scripts]
+sovereign-files = "sovereign_files.main:cli"
